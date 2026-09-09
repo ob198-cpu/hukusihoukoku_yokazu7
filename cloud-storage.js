@@ -5,6 +5,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function() {
   function create({prefix, storage, request, clientId, digest, onStatus = () => {}}) {
     const memory = new Map();
+    const legacyMemory = new Set();
     let migrated = false;
     const jobs = new Map();
     function owned(key) { return key === prefix || key.startsWith(prefix + ':'); }
@@ -13,8 +14,8 @@
       if (migrated) return null;
       try { return storage.getItem(key); } catch { return null; }
     }
-    function writeRaw(key, raw) { memory.set(key, raw); }
-    function removeRaw(key) { memory.set(key, null); }
+    function writeRaw(key, raw) { legacyMemory.delete(key); memory.set(key, raw); }
+    function removeRaw(key) { legacyMemory.delete(key); memory.set(key, null); }
     async function archive(key, raw) {
       const hash = await digest(key + '\n' + raw);
       const receipt = await request('archiveBrowserData', {storageKey:key, payload:raw, digest:hash, clientId});
@@ -28,9 +29,10 @@
       for (const key of keys) {
         const raw = storage.getItem(key);
         if (raw === null) continue;
-        if (!memory.has(key)) memory.set(key, raw);
+        if (!memory.has(key) || legacyMemory.has(key)) { memory.set(key, raw); legacyMemory.add(key); }
         await archive(key, raw);
-        if (storage.getItem(key) !== raw) throw Error('別画面でデータが更新されたため移行を再試行します。');
+        const current = storage.getItem(key);
+        if (current !== null && current !== raw) throw Error('別画面でデータが更新されたため移行を再試行します。');
         storage.removeItem(key);
       }
       migrated = true;
