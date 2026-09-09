@@ -3236,6 +3236,7 @@ body.modal-open {
   </div>
 
   <script src="sync-engine.js?v=20260730-conflict-review"></script>
+  <script src="cloud-storage.js?v=20260909-server-storage"></script>
   <script>
     const STORAGE_KEY = "sns_operation_report_yokazu7_v4";
     const CLOUD_API_URL = "https://script.google.com/macros/s/AKfycbyEqN6b5KVAXlU_03_in2WDdlDUcJNAsvU54EvB6ZRQFf_k1Xh68HkkowOqD3wqxek4/exec";
@@ -3262,8 +3263,14 @@ body.modal-open {
     const CLOUD_RECOVERY_KEY = STORAGE_KEY + ":recovery_snapshots_v2";
     const CLOUD_MAX_MERGE_RETRIES = 6;
     const CLOUD_RETRY_DELAY_MS = 15000;
-    const CLOUD_CLIENT_ID = localStorage.getItem(CLOUD_CLIENT_ID_KEY) || ("client_" + Date.now() + "_" + Math.random().toString(36).slice(2));
-    localStorage.setItem(CLOUD_CLIENT_ID_KEY, CLOUD_CLIENT_ID);
+    const CLOUD_CLIENT_ID = "client_" + Date.now() + "_" + Math.random().toString(36).slice(2);
+    const cloudStorage = window.SnsCloudStorage.create({
+      prefix: STORAGE_KEY, storage: window.localStorage, clientId: CLOUD_CLIENT_ID,
+      request: (action, payload) => cloudRequest(action, payload),
+      digest: async text => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))))
+        .map(byte => byte.toString(16).padStart(2, "0")).join(""),
+      onStatus: message => { if (message) setCloudStatus(message, "error"); }
+    });
     const businesses = ["自事業所"];
     const monitoringUsers = ["大場", "A", "B", "C", "D", "E", "F"];
     const snsTypes = ["X", "Instagram", "TikTok", "Threads", "YouTube"];
@@ -3599,7 +3606,7 @@ body.modal-open {
     }
 
     function loadData() {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      const raw = cloudStorage.readRaw(STORAGE_KEY);
       if (!raw) return normalizeData({ accounts: defaultAccounts() });
       try {
         return normalizeData(JSON.parse(raw));
@@ -3610,7 +3617,7 @@ body.modal-open {
 
     function readLocalJson(key, fallback = null) {
       try {
-        const raw = localStorage.getItem(key);
+        const raw = cloudStorage.readRaw(key);
         return raw ? JSON.parse(raw) : fallback;
       } catch {
         return fallback;
@@ -3619,7 +3626,7 @@ body.modal-open {
 
     function writeLocalJson(key, value) {
       try {
-        localStorage.setItem(key, JSON.stringify(value));
+        cloudStorage.writeRaw(key, JSON.stringify(value));
         updateStorageCapacityWarning();
         return true;
       } catch {
@@ -3628,33 +3635,9 @@ body.modal-open {
       }
     }
 
-    function localStorageUsageBytes() {
-      let total = 0;
-      for (let index = 0; index < localStorage.length; index += 1) {
-        const key = localStorage.key(index) || "";
-        const value = localStorage.getItem(key) || "";
-        total += (key.length + value.length) * 2;
-      }
-      return total;
-    }
-
-    function updateStorageCapacityWarning(force = false) {
-      const status = $("#cloud-status");
-      if (!status) return;
-      let warning = $("#storage-capacity-warning");
-      if (!warning) {
-        warning = document.createElement("div");
-        warning.id = "storage-capacity-warning";
-        warning.className = "cloud-status error no-print";
-        warning.hidden = true;
-        status.insertAdjacentElement("afterend", warning);
-      }
-      const bytes = localStorageUsageBytes();
-      const shouldWarn = force || bytes >= 3.5 * 1024 * 1024;
-      warning.hidden = !shouldWarn;
-      if (shouldWarn) {
-        warning.textContent = `ブラウザ保存の使用量が約${(bytes / 1024 / 1024).toFixed(1)}MBです。シート保存完了を確認し、不要な復旧履歴を整理してください。`;
-      }
+    function updateStorageCapacityWarning() {
+      const warning = document.querySelector("#storage-capacity-warning");
+      if (warning) warning.remove();
     }
 
     function saveRecoverySnapshot(reason, snapshot) {
@@ -3669,6 +3652,7 @@ body.modal-open {
         data: normalizeData(cloneRecord(snapshot))
       }, ...(Array.isArray(entries) ? entries : [])].slice(0, retention);
       writeLocalJson(CLOUD_RECOVERY_KEY, next);
+      cloudStorage.queueArchive(CLOUD_RECOVERY_KEY, JSON.stringify(next));
     }
 
     function pruneConfirmedRecoverySnapshots(confirmed) {
@@ -3680,8 +3664,8 @@ body.modal-open {
         !window.SnsSyncMerge.equal(normalizeData(entry.data), normalizeData(confirmed)));
       if (remaining.length === entries.length) return;
       try {
-        if (remaining.length) localStorage.setItem(CLOUD_RECOVERY_KEY, JSON.stringify(remaining));
-        else localStorage.removeItem(CLOUD_RECOVERY_KEY);
+        if (remaining.length) cloudStorage.writeRaw(CLOUD_RECOVERY_KEY, JSON.stringify(remaining));
+        else cloudStorage.removeRaw(CLOUD_RECOVERY_KEY);
       } catch {
         // Cleanup failure must not interrupt synchronization.
       }
@@ -3735,14 +3719,14 @@ body.modal-open {
         const legacy = readLocalJson(CLOUD_LEGACY_PENDING_KEY, null);
         if (legacy?.id && legacy.id !== pending.id) {
           try {
-            localStorage.removeItem(CLOUD_LEGACY_PENDING_KEY);
+            cloudStorage.removeRaw(CLOUD_LEGACY_PENDING_KEY);
           } catch {
             // The current tab-specific pending copy remains available.
           }
         }
       }
       if (!stored) {
-        setCloudStatus("未保存データの端末内退避に失敗しました。管理者へ連絡してください。", "error");
+        setCloudStatus("未保存データの準備に失敗しました。画面を閉じないでください。", "error");
       }
       return pending;
     }
@@ -3755,7 +3739,7 @@ body.modal-open {
         const stored = readLocalJson(key, null);
         if (!stored || !expectedId || stored.id === expectedId) {
           try {
-            localStorage.removeItem(key);
+            cloudStorage.removeRaw(key);
           } catch {
             // A confirmed server save is authoritative even if local cleanup fails.
           }
@@ -3764,7 +3748,7 @@ body.modal-open {
       const dirty = readLocalJson(CLOUD_DIRTY_MARKER_KEY, null);
       if (!dirty || !expectedId || dirty.id === expectedId) {
         try {
-          localStorage.removeItem(CLOUD_DIRTY_MARKER_KEY);
+          cloudStorage.removeRaw(CLOUD_DIRTY_MARKER_KEY);
         } catch {
           // A stale marker only causes a safe merge on the next load.
         }
@@ -3775,7 +3759,7 @@ body.modal-open {
       const stored = readLocalJson(CLOUD_LEGACY_PENDING_KEY, null);
       if (stored && stored.id === expectedId) {
         try {
-          localStorage.removeItem(CLOUD_LEGACY_PENDING_KEY);
+          cloudStorage.removeRaw(CLOUD_LEGACY_PENDING_KEY);
         } catch {
           // It can be retried after reload without losing data.
         }
@@ -3799,18 +3783,11 @@ body.modal-open {
 
     function saveData(nextData) {
       const snapshot = normalizeData(cloneRecord(nextData));
-      const primaryStored = writeLocalJson(STORAGE_KEY, snapshot);
+      writeLocalJson(STORAGE_KEY, snapshot);
       if (!cloudEnabled()) return;
       const pending = writePendingCloudWrite(snapshot);
-      setCloudStatus(
-        !primaryStored && !pending.stored
-          ? "端末容量不足です。画面を閉じず、シート保存完了を待ってください。"
-          : cloudSyncReady
-            ? "この端末に退避済み・シート保存待ち"
-            : "この端末に退避済み・シート接続待ち",
-        !primaryStored && !pending.stored ? "error" : "syncing"
-      );
-      if (cloudSyncReady) scheduleCloudSave();
+      setCloudStatus(cloudSyncReady ? "サーバーへ保存中（まだ画面を閉じないでください）" : "サーバー未保存・接続回復待ち（画面を閉じないでください）", "syncing");
+      if (cloudSyncReady) scheduleCloudSave(0);
     }
 
     function cloudEnabled() {
@@ -3869,7 +3846,7 @@ body.modal-open {
 
     function applySyncedData(snapshot, shouldRender = false) {
       data = normalizeData(cloneRecord(snapshot || {}));
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      cloudStorage.writeRaw(STORAGE_KEY, JSON.stringify(data));
       if (shouldRender) {
         setupForms();
         renderAll();
@@ -3914,7 +3891,7 @@ body.modal-open {
         overlay.innerHTML = `
           <section style="width:min(720px,100%);max-height:85vh;overflow:auto;border-radius:8px;padding:24px;background:#fff;box-shadow:0 24px 60px rgba(0,0,0,.25)">
             <h2 style="margin:0 0 10px;font-size:22px">同じ項目が別の端末でも変更されています</h2>
-            <p>自動では上書きしません。残す内容を選んでください。選択しない場合、入力はこの端末に保全されます。</p>
+            <p>自動では上書きしません。残す内容を選んでください。選択しない場合、入力はこの画面に保持されます。保存完了まで画面を閉じないでください。</p>
             <ul style="padding-left:22px">${items}</ul>
             ${conflicts.length > 8 ? `<p>ほか ${conflicts.length - 8}項目</p>` : ""}
             <div style="display:flex;flex-wrap:wrap;justify-content:flex-end;gap:10px;margin-top:18px">
@@ -4018,12 +3995,12 @@ body.modal-open {
           }
         }
 
-        setCloudStatus("更新が集中しています。入力は端末内に保全し、自動再試行します。", "syncing");
+        setCloudStatus("更新が集中しています。サーバー未保存です。画面を閉じずにお待ちください。", "syncing");
       } catch (error) {
         const pending = readPendingCloudWrite();
         if (pending) saveRecoverySnapshot("通信・保存エラー時の未保存入力", pending.data);
         setCloudStatus(
-          "シート未保存・入力はこの端末に保全済みです。接続回復後に自動再試行します。",
+          "サーバー未保存です。画面を閉じないでください。接続回復後に自動再試行します。",
           "error"
         );
       } finally {
@@ -4066,7 +4043,7 @@ body.modal-open {
     async function initCloudSync() {
       if (!cloudEnabled()) {
         finishInitialCloudLoading();
-        setCloudStatus("ローカル保存中", "error");
+        setCloudStatus("サーバー保存先が未設定です。入力を保存できません。", "error");
         return;
       }
       setCloudStatus("シート読込中", "syncing");
@@ -4075,6 +4052,10 @@ body.modal-open {
         const result = await cloudRequest("loadData");
         const remoteData = normalizeData(result.data || {});
         const remoteRevision = result.updatedAt || "";
+        if (!result.browserArchiveSupported) throw new Error("サーバーの保存移行機能が未対応です。");
+        setCloudStatus("以前の端末データをサーバーへ移行中", "syncing");
+        await cloudStorage.migrate();
+        updateStorageCapacityWarning();
         const pending = readPendingCloudWrite();
 
         if (pending) {
@@ -4116,7 +4097,7 @@ body.modal-open {
       } catch (error) {
         cloudSyncReady = false;
         setCloudStatus(
-          "シート接続待ち・入力はこの端末に保全します。",
+          "サーバー接続待ちです。未保存のため画面を閉じないでください。",
           "error"
         );
         setInitialCloudLoading(
@@ -4159,7 +4140,7 @@ body.modal-open {
 
     function startCloudRefresh() {
       clearInterval(cloudRefreshTimer);
-      cloudRefreshTimer = setInterval(refreshCloudIfIdle, 30000);
+      cloudRefreshTimer = setInterval(() => { cloudStorage.retryArchives(); refreshCloudIfIdle(); }, 30000);
     }
 
     let data = loadData();
@@ -6870,37 +6851,21 @@ body.modal-open {
     }
 
     window.addEventListener("online", () => {
+      cloudStorage.retryArchives();
       if (cloudSyncReady) scheduleCloudSave(0);
       else initCloudSync();
     });
 
     window.addEventListener("beforeunload", event => {
-      if (!readPendingCloudWrite()) return;
+      if (!readPendingCloudWrite() && !cloudStorage.hasPendingArchives()) return;
       event.preventDefault();
       event.returnValue = "";
     });
 
     window.addEventListener("storage", event => {
-      if (
-        event.key === STORAGE_KEY
-        && event.newValue
-        && !hasActiveFormInput()
-        && !readPendingCloudWrite()
-      ) {
-        try {
-          applySyncedData(JSON.parse(event.newValue), true);
-        } catch {
-          // Ignore an incomplete cross-tab storage event and keep the current view.
-        }
-      }
-      if (
-        event.key
-        && event.key.startsWith(CLOUD_PENDING_PREFIX + ":")
-        && event.key !== CLOUD_PENDING_KEY
-        && !readPendingCloudWrite()
-      ) {
-        refreshCloudIfIdle();
-      }
+      if (!event.key || !(event.key === STORAGE_KEY || event.key.startsWith(STORAGE_KEY + ":")) || event.newValue === null) return;
+      // An older open tab may still write local data: archive before removing it.
+      cloudStorage.migrate().catch(() => setCloudStatus("別画面の保存データを移行待ちです。画面を閉じずにお待ちください。", "error"));
     });
 
     document.addEventListener("visibilitychange", () => {

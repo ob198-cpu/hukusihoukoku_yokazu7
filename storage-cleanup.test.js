@@ -12,9 +12,9 @@ const context = vm.createContext({
   CLOUD_RECOVERY_KEY: 'recovery', window: { SnsSyncMerge: require('./sync-engine.js') },
   normalizeData: x => x,
   readLocalJson: (key, fallback) => values.has(key) ? JSON.parse(values.get(key)) : fallback,
-  localStorage: {
-    setItem(key, value) { if (fail) throw Error('quota'); values.set(key, value); },
-    removeItem(key) { if (fail) throw Error('blocked'); values.delete(key); }
+  cloudStorage: {
+    writeRaw(key, value) { if (fail) throw Error('unavailable'); values.set(key, value); },
+    removeRaw(key) { if (fail) throw Error('blocked'); values.delete(key); }
   }, updateStorageCapacityWarning() {}
 });
 vm.runInContext(html.slice(start, end), context);
