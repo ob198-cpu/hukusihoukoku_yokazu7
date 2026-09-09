@@ -3671,11 +3671,21 @@ body.modal-open {
       writeLocalJson(CLOUD_RECOVERY_KEY, next);
     }
 
-    function pruneConfirmedRecoverySnapshots() {
-      const entries = readLocalJson(CLOUD_RECOVERY_KEY, []);
-      if (Array.isArray(entries) && entries.length > 1) {
-        writeLocalJson(CLOUD_RECOVERY_KEY, entries.slice(0, 1));
+    function pruneConfirmedRecoverySnapshots(confirmed) {
+      if (!confirmed || !window.SnsSyncMerge) return;
+      const entries = readLocalJson(CLOUD_RECOVERY_KEY, null);
+      if (!Array.isArray(entries)) return;
+      // Delete only exact duplicates of server-confirmed data; preserve pending keys.
+      const remaining = entries.filter(entry => !entry?.data ||
+        !window.SnsSyncMerge.equal(normalizeData(entry.data), normalizeData(confirmed)));
+      if (remaining.length === entries.length) return;
+      try {
+        if (remaining.length) localStorage.setItem(CLOUD_RECOVERY_KEY, JSON.stringify(remaining));
+        else localStorage.removeItem(CLOUD_RECOVERY_KEY);
+      } catch {
+        // Cleanup failure must not interrupt synchronization.
       }
+      updateStorageCapacityWarning();
     }
 
     function readPendingCloudWrite() {
@@ -3958,13 +3968,14 @@ body.modal-open {
             if (!window.SnsSyncMerge.equal(confirmed, expected)) {
               throw new Error("サーバーの読戻し内容が送信内容と一致しません。");
             }
+            pruneConfirmedRecoverySnapshots(confirmed);
             persistCloudBase(confirmed, result.updatedAt || cloudRevision);
 
             const latestPending = readPendingCloudWrite();
             if (latestPending && latestPending.id === pending.id) {
               clearPendingCloudWrite(pending.id);
               applySyncedData(confirmed, false);
-              pruneConfirmedRecoverySnapshots();
+              pruneConfirmedRecoverySnapshots(confirmed);
               cloudConflictWaiting = false;
               setCloudStatus("シート保存済み（サーバー読戻し確認済み）", "ok");
               finishInitialCloudLoading();
@@ -4079,7 +4090,9 @@ body.modal-open {
           }
           setCloudStatus("未保存入力を復元し、シートへ保存中", "syncing");
         } else {
-          if (cloudDataHasRows(data) && !window.sessionStorage.getItem(STORAGE_KEY + ":startup_backup")) {
+          pruneConfirmedRecoverySnapshots(remoteData);
+          if (cloudDataHasRows(data) && !window.SnsSyncMerge.equal(normalizeData(data), remoteData) &&
+              !window.sessionStorage.getItem(STORAGE_KEY + ":startup_backup")) {
             saveRecoverySnapshot("クラウド読込前の端末データ", data);
             window.sessionStorage.setItem(STORAGE_KEY + ":startup_backup", "1");
           }
